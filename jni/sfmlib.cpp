@@ -16,13 +16,14 @@ vector<Point3d> pointCloud;
 bool ratio = false;
 double reError = 0;
 int matcherAlgo = 0;
+
 void drawOptFlowMap(const Mat& flow, Mat& cflowmap, int step,
 		const Scalar& color) {
 	for (int y = 0; y < cflowmap.rows; y += step)
 		for (int x = 0; x < cflowmap.cols; x += step) {
 			const Point2f& fxy = flow.at<Point2f>(y, x);
 			float mag = sqrt(fxy.x * fxy.x + fxy.y * fxy.y);
-			if (mag > 5) {
+			if (mag > 5) {//filter to use only points with a min movement
 				line(cflowmap, Point(x, y),
 						Point(cvRound(x + fxy.x), cvRound(y + fxy.y)), color);
 				circle(cflowmap, Point(x, y), 2, color, -1);
