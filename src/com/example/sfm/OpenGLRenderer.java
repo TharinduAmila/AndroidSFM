@@ -33,8 +33,9 @@ public class OpenGLRenderer implements Renderer {
 		public void onSurfaceChanged( final GL10 gl, final int width, final int height ) {
 		    gl.glViewport( 0, 0, width, height );   
 		    gl.glMatrixMode( GL10.GL_PROJECTION );  
-		    gl.glLoadIdentity();                    
-		    GLU.gluPerspective( gl, 50.0f, (float)width / (float)height, 0.1f, 100f );
+		    gl.glLoadIdentity();       
+		    //check to set far and near
+		    GLU.gluPerspective( gl, 50.0f, (float)width / (float)height, 0.1f, 10000f );
 
 		    gl.glMatrixMode( GL10.GL_MODELVIEW ); 
 		    gl.glLoadIdentity();                    
@@ -44,6 +45,7 @@ public class OpenGLRenderer implements Renderer {
 		@Override
 		public void onSurfaceCreated( final GL10 gl, final EGLConfig config ) {
 			
+			gl.glClearDepthf(1.0f);    
 		      float[] arrayPoints = new float[]{};
 			/**pass Point array to points class */    
 		    points = new Points( arrayPoints  );
