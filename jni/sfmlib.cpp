@@ -17,32 +17,19 @@ bool ratio = false;
 double reError = 0;
 int matcherAlgo = 0;
 
-void drawOptFlowMap(const Mat& flow, Mat& cflowmap, int step,
-		const Scalar& color) {
-	for (int y = 0; y < cflowmap.rows; y += step)
-		for (int x = 0; x < cflowmap.cols; x += step) {
-			const Point2f& fxy = flow.at<Point2f>(y, x);
-			float mag = sqrt(fxy.x * fxy.x + fxy.y * fxy.y);
-			if (mag > 5) {//filter to use only points with a min movement
-				line(cflowmap, Point(x, y),
-						Point(cvRound(x + fxy.x), cvRound(y + fxy.y)), color);
-				circle(cflowmap, Point(x, y), 2, color, -1);
-			}
-		}
-}
-
 void KeyPointsToPoints(vector<KeyPoint> in, vector<Point2f>& out) {
 	out.clear();
 	for (int i = 0; i < in.size(); i++) {
 		out.push_back(in[i].pt);
 	}
 }
-void PointsToKeyPoints(vector<Point2f>& in, vector<KeyPoint> out) {
+void PointsToKeyPoints(vector<Point2f> in, vector<KeyPoint>& out) {
 	out.clear();
 	for (int i = 0; i < in.size(); i++) {
 		out.push_back(KeyPoint(in[i], CV_32F));
 	}
 }
+
 bool CheckCoherentRotation(cv::Mat_<double>& R) {
 	if (fabsf(determinant(R)) - 1.0 > 1e-07) {
 		return false;
@@ -94,7 +81,7 @@ void OFmatch(Mat img1, Mat img2) {
 	GaussianBlur(prevgray, prevgray, Size(5, 5), 0, 0);
 	GaussianBlur(gray, gray, Size(5, 5), 0, 0);
 	vector<KeyPoint> left_keypoints, right_keypoints;
-	OrbFeatureDetector ffd(1000);
+	FastFeatureDetector ffd(10,true);
 	ffd.detect(prevgray, left_keypoints);
 	ffd.detect(gray, right_keypoints);
 	vector<Point2f> left_points;
@@ -177,7 +164,7 @@ void OFmatch(Mat img1, Mat img2) {
 	findEssentialMatrix(imgpts1, imgpts2);
 }
 
-void denseOFmatch(Mat img1, Mat img2, Mat& flow) {
+void denseOFmatch(Mat img1, Mat img2, Mat& flow,int step) {
 	Mat prevgray, gray;
 	cvtColor(img1, prevgray, CV_RGBA2GRAY);
 	cvtColor(img2, gray, CV_RGBA2GRAY);
@@ -185,11 +172,24 @@ void denseOFmatch(Mat img1, Mat img2, Mat& flow) {
 	GaussianBlur(gray, gray, Size(5, 5), 0, 0);
 	calcOpticalFlowFarneback(prevgray, gray, flow, 0.3, 8, 30, 10, 5, 1.2,
 			OPTFLOW_FARNEBACK_GAUSSIAN);
+	vector<Point2f> imgPnt1, imgPnt2;
+	for (int y = 0; y < flow.rows; y += step)
+		for (int x = 0; x < flow.cols; x += step) {
+			const Point2f& fxy = flow.at<Point2f>(y, x);
+			float mag = sqrt(fxy.x * fxy.x + fxy.y * fxy.y);
+			if (mag > 5 && cvRound(x + fxy.x)>0 && cvRound(x + fxy.x)<flow.cols
+					&& cvRound(y + fxy.y) >0 && cvRound(y + fxy.y)<flow.rows) { //filter to use only points with a min movement
+				imgPnt1.push_back(Point2f(x, y));
+				imgPnt2.push_back(
+						Point2f(cvRound(x + fxy.x), cvRound(y + fxy.y)));
+			}
+		}
+	findEssentialMatrix(imgPnt1,imgPnt2);
 }
 
 int getMatchesUsingORB(Mat img1, Mat img2) {
 	Mat gray1, gray2, desc1, desc2;
-	vector<KeyPoint> kpnt1,kpnt2;
+	vector<KeyPoint> kpnt1, kpnt2;
 	cvtColor(img1, gray1, CV_RGBA2GRAY);
 	cvtColor(img2, gray2, CV_RGBA2GRAY);
 	detector.detect(gray1, kpnt1);
@@ -216,7 +216,7 @@ int getMatchesUsingORB(Mat img1, Mat img2) {
 		matcher.match(desc1, desc2, temp);
 	}
 	vector<Point2f> imgPnt1, imgPnt2;
-	for(int i=0;i<temp.size();i++){
+	for (int i = 0; i < temp.size(); i++) {
 		imgPnt1.push_back(kpnt1[temp[i].queryIdx].pt);
 		imgPnt2.push_back(kpnt2[temp[i].trainIdx].pt);
 	}
@@ -354,11 +354,8 @@ Java_com_example_sfm_MainActivity_match(JNIEnv *env, jobject obj,
 	} else if (matcherAlgo == 1) {
 		OFmatch(image1, image2);
 	} else if (matcherAlgo == 2) {
-//		Mat flow, cflow;
-//		i1.copyTo(cflow);
-//		denseOFmatch(image1, image2, flow);
-//		drawOptFlowMap(flow, cflow, 1, Scalar(255, 0, 0));
-//		cflow.copyTo(out);
+		Mat flow;
+		denseOFmatch(image1, image2, flow,10);
 	}
 //resize(out,out,image1.size());
 	mDrawMatches(mRgb);
@@ -391,6 +388,8 @@ Java_com_example_sfm_MainActivity_setImage2(JNIEnv *env, jobject obj,
 JNIEXPORT void JNICALL
 Java_com_example_sfm_MainActivity_setMatcher(JNIEnv *env, jobject obj,
 		jint in) {
+	k1.clear();
+	k2.clear();
 	matcherAlgo = in;
 }
 JNIEXPORT jdoubleArray JNICALL Java_com_example_sfm_Points_getPointsArray(
