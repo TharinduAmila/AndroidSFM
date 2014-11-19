@@ -51,9 +51,15 @@ int findEssentialMatrix(vector<Point2f> imgpts1, vector<Point2f> imgpts2) {
 	Mat svd_vt = svd.vt;
 	Mat svd_w = svd.w;
 	Matx33d W(0, -1, 0,	//HZ 9.13
-			1, 0, 0, 0, 0, 1);
+			1, 0, 0,
+			0, 0, 1);
 	Mat_<double> R = svd_u * Mat(W) * svd_vt; //HZ 9.19
 	Mat_<double> t = svd_u.col(2); //u3
+	//step added to refine R
+	SVD rSVD(R);
+	R = rSVD.u*Mat::eye(3,3,CV_64F)*rSVD.vt;
+	double myscale = trace(rSVD.w)[0]/3;
+	t = t/myscale;
 	if (!CheckCoherentRotation(R)) {
 		P1 = 0;
 		return 0;
@@ -81,7 +87,7 @@ void OFmatch(Mat img1, Mat img2) {
 	GaussianBlur(prevgray, prevgray, Size(5, 5), 0, 0);
 	GaussianBlur(gray, gray, Size(5, 5), 0, 0);
 	vector<KeyPoint> left_keypoints, right_keypoints;
-	FastFeatureDetector ffd(10,true);
+	FastFeatureDetector ffd(8, true);
 	ffd.detect(prevgray, left_keypoints);
 	ffd.detect(gray, right_keypoints);
 	vector<Point2f> left_points;
@@ -164,12 +170,14 @@ void OFmatch(Mat img1, Mat img2) {
 	findEssentialMatrix(imgpts1, imgpts2);
 }
 
-void denseOFmatch(Mat img1, Mat img2, Mat& flow,int step) {
+void denseOFmatch(Mat img1, Mat img2, Mat& flow, int step) {
 	Mat prevgray, gray;
 	cvtColor(img1, prevgray, CV_RGBA2GRAY);
 	cvtColor(img2, gray, CV_RGBA2GRAY);
+
 	GaussianBlur(prevgray, prevgray, Size(5, 5), 0, 0);
 	GaussianBlur(gray, gray, Size(5, 5), 0, 0);
+
 	calcOpticalFlowFarneback(prevgray, gray, flow, 0.3, 8, 30, 10, 5, 1.2,
 			OPTFLOW_FARNEBACK_GAUSSIAN);
 	vector<Point2f> imgPnt1, imgPnt2;
@@ -177,14 +185,15 @@ void denseOFmatch(Mat img1, Mat img2, Mat& flow,int step) {
 		for (int x = 0; x < flow.cols; x += step) {
 			const Point2f& fxy = flow.at<Point2f>(y, x);
 			float mag = sqrt(fxy.x * fxy.x + fxy.y * fxy.y);
-			if (mag > 5 && cvRound(x + fxy.x)>0 && cvRound(x + fxy.x)<flow.cols
-					&& cvRound(y + fxy.y) >0 && cvRound(y + fxy.y)<flow.rows) { //filter to use only points with a min movement
+			if (mag > 5 && cvRound(x + fxy.x) > 0
+					&& cvRound(x + fxy.x) < flow.cols && cvRound(y + fxy.y) > 0
+					&& cvRound(y + fxy.y) < flow.rows) { //filter to use only points with a min movement
 				imgPnt1.push_back(Point2f(x, y));
 				imgPnt2.push_back(
 						Point2f(cvRound(x + fxy.x), cvRound(y + fxy.y)));
 			}
 		}
-	findEssentialMatrix(imgPnt1,imgPnt2);
+	findEssentialMatrix(imgPnt1, imgPnt2);
 }
 
 int getMatchesUsingORB(Mat img1, Mat img2) {
@@ -249,7 +258,7 @@ Mat_<double> IterativeLinearLSTriangulation(Point3d u, //homogenous image point 
 		) {
 	double wi = 1, wi1 = 1;
 	Mat_<double> X(4, 1);
-	for (int i = 0; i < 10; i++) { //Hartley suggests 10 iterations at most
+	for (int i = 0; i < 14; i++) { //Hartley suggests 10 iterations at most
 		Mat_<double> X_ = LinearLSTriangulation(u, u1, P, P1);
 		X(0) = X_(0);
 		X(1) = X_(1);
@@ -355,7 +364,7 @@ Java_com_example_sfm_MainActivity_match(JNIEnv *env, jobject obj,
 		OFmatch(image1, image2);
 	} else if (matcherAlgo == 2) {
 		Mat flow;
-		denseOFmatch(image1, image2, flow,10);
+		denseOFmatch(image1, image2, flow, 10);
 	}
 //resize(out,out,image1.size());
 	mDrawMatches(mRgb);
