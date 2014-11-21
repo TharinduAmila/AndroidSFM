@@ -12,27 +12,28 @@ import android.util.Log;
 public class Points {
 	private double[] vertices;
 	private float[] fvertices;
+	float[] colorArray;
 	private FloatBuffer vertexBuffer;
 	private FloatBuffer colorBuffer;
 	public native double[] getPointsArray();
-	public Points( final float[] pointsArray ){
+	public native float[] getColorsArray();
+	public Points(){
 
 	    //this.vertices=pointsArray;
 		this.vertices = getPointsArray();
 		fvertices = new float[vertices.length];
-	    float[] colorArray = new float[(vertices.length/3)*4];
-	    String show ="";
-	    for (int i = 0,j=0; i < colorArray.length; i+=4,j+=3) {
-	    	colorArray[i] = (float)Math.random(); //0f, 0f, 1f
-	    	colorArray[i+1] = (float)Math.random();
-	    	colorArray[i+2] = (float)Math.random();
-	    	colorArray[i+3] = 1f;
-	    	fvertices[j] = (float)vertices[j];
-	    	fvertices[j+1] = (float)vertices[j+1];
-	    	fvertices[j+2] = (float)vertices[j+2];
-	    	show += "["+fvertices[j]+","+fvertices[j+1]+","+fvertices[j+2]+"] ";
+	    colorArray = getColorsArray();
+	    Log.e("Size", ""+colorArray.length);
+	    String show ="",colo="";
+	    for (int i = 0,j=0; i < vertices.length; i+=3,j+=4) {
+	    	fvertices[i] = (float)vertices[i];
+	    	fvertices[i+1] = (float)vertices[i+1];
+	    	fvertices[i+2] = (float)vertices[i+2];
+	    	show += "["+fvertices[i]+","+fvertices[i+1]+","+fvertices[i+2]+"] ";
+	    	colo += "["+colorArray[j]+","+colorArray[j+1]+","+colorArray[j+2]+","+colorArray[j+3]+"] ";
 		}
 	    Log.e("Point List", show);
+	    Log.e("Color List", colo);
 	    ByteBuffer byteBuf = ByteBuffer.allocateDirect( vertices.length *4 );
 	    byteBuf.order( ByteOrder.nativeOrder() );
 	    vertexBuffer = byteBuf.asFloatBuffer();

@@ -51,15 +51,14 @@ int findEssentialMatrix(vector<Point2f> imgpts1, vector<Point2f> imgpts2) {
 	Mat svd_vt = svd.vt;
 	Mat svd_w = svd.w;
 	Matx33d W(0, -1, 0,	//HZ 9.13
-			1, 0, 0,
-			0, 0, 1);
+			1, 0, 0, 0, 0, 1);
 	Mat_<double> R = svd_u * Mat(W) * svd_vt; //HZ 9.19
 	Mat_<double> t = svd_u.col(2); //u3
 	//step added to refine R
 	SVD rSVD(R);
-	R = rSVD.u*Mat::eye(3,3,CV_64F)*rSVD.vt;
-	double myscale = trace(rSVD.w)[0]/3;
-	t = t/myscale;
+	R = rSVD.u * Mat::eye(3, 3, CV_64F) * rSVD.vt;
+	double myscale = trace(rSVD.w)[0] / 3;
+	t = t / myscale;
 	if (!CheckCoherentRotation(R)) {
 		P1 = 0;
 		return 0;
@@ -323,7 +322,7 @@ double TriangulatePoints(const vector<KeyPoint>& pt_set1,
 		Point2f xPt_img_(xPt_img(0) / xPt_img(2), xPt_img(1) / xPt_img(2));
 		reproj_error.push_back(norm(xPt_img_ - kp1));
 //store 3D point
-		pointcloud.push_back(Point3d(X(0), X(1), X(2)));
+		pointcloud.push_back(Point3d(-X(0), X(1), X(2)));
 	}
 //return mean reprojection error
 	Scalar me = mean(reproj_error);
@@ -440,6 +439,49 @@ JNIEXPORT jdoubleArray JNICALL Java_com_example_sfm_Points_getPointsArray(
 	// move from the temp structure to the java structure
 	env->SetDoubleArrayRegion(result, 0, size, fill);
 	return result;
+}
+
+JNIEXPORT jfloatArray JNICALL Java_com_example_sfm_Points_getColorsArray(
+		JNIEnv *env, jobject obj) {
+	int size = 0;
+	if (k1.empty()) {
+		jfloat fill[9 * 4];
+		size = 9 * 4;
+		for (int i = 0; i < 9; i++) {
+			fill[i * 4] = ((rand() % 100 + 10) / 110.f);
+			fill[i * 4 + 1] = ((rand() % 100 + 10) / 110.f);
+			fill[i * 4 + 2] = ((rand() % 100 + 10) / 110.f);
+			fill[i * 4 + 3] = 1.0f;
+		}
+		jfloatArray result;
+		result = env->NewFloatArray(size);
+		if (result == NULL) {
+			return NULL; /* out of memory error thrown */
+		}
+		// move from the temp structure to the java structure
+		env->SetFloatArrayRegion(result, 0, size, fill);
+		return result;
+	} else {
+		size = k1.size() * 4;
+		jfloat fill[size];
+		Mat matC;
+		cvtColor(image1,matC,CV_RGBA2RGB);
+		for (int i = 0; i < k1.size(); i++) {
+			fill[i * 4] = (matC.at<Vec3b>(k1[i].pt)).val[0]/255.f;
+			fill[i * 4 + 1] = (matC.at<Vec3b>(k1[i].pt)).val[1]/255.f;
+			fill[i * 4 + 2] = (matC.at<Vec3b>(k1[i].pt)).val[2]/255.f;
+			fill[i * 4 + 3] = 1.0f;
+		}
+		jfloatArray result;
+		result = env->NewFloatArray(size);
+		if (result == NULL) {
+			return NULL; /* out of memory error thrown */
+		}
+		// move from the temp structure to the java structure
+		env->SetFloatArrayRegion(result, 0, size, fill);
+		return result;
+	}
+	return NULL;
 }
 
 JNIEXPORT void JNICALL

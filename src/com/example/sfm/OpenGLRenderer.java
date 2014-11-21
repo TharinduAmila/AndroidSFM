@@ -46,9 +46,7 @@ public class OpenGLRenderer implements Renderer {
 		public void onSurfaceCreated( final GL10 gl, final EGLConfig config ) {
 			
 			gl.glClearDepthf(1.0f);    
-		      float[] arrayPoints = new float[]{};
-			/**pass Point array to points class */    
-		    points = new Points( arrayPoints  );
+		    points = new Points();
 
 		}
 }

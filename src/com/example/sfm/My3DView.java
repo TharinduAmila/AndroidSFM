@@ -36,7 +36,7 @@ public class My3DView extends GLSurfaceView implements EventListener{
 		OpenGLRenderer.scale *= detector.getScaleFactor();
 
 		// Don't let the object get too small or too large.
-		OpenGLRenderer.scale = Math.min(0f, Math.max(OpenGLRenderer.scale, -100.0f));
+		OpenGLRenderer.scale = Math.min(0f, Math.max(OpenGLRenderer.scale, -1000.0f));
 
 		invalidate();
 		return true;
