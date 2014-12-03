@@ -6,10 +6,12 @@ using namespace std;
 using namespace cv;
 
 ORB detector(1000);
-Mat image, image1, image2;
+Mat image;
+vector<Mat> imageList;
 Mat_<double> E;
 Mat K(3, 3, CV_64F);
-vector<KeyPoint> k1, k2;
+vector<vector<vector<Point2f> > > matchesBetweenImages;
+vector<vector<vector<KeyPoint> > > matchesUsedFor3d;
 Matx34d P;
 Matx34d P1;
 vector<Point3d> pointCloud;
@@ -36,14 +38,207 @@ bool CheckCoherentRotation(cv::Mat_<double>& R) {
 	}
 	return true;
 }
+Mat_<double> LinearLSTriangulation(Point3d u,	//homogenous image point (u,v,1)
+		Point3d u1, 	//homogenous image point in 2nd camera)
+		Matx34d P, Matx34d P1) { 	//camera matrices
+	//build A matrix
+	Matx43d A(u.x * P(2, 0) - P(0, 0), u.x * P(2, 1) - P(0, 1),
+			u.x * P(2, 2) - P(0, 2), u.y * P(2, 0) - P(1, 0),
+			u.y * P(2, 1) - P(1, 1), u.y * P(2, 2) - P(1, 2),
+			u1.x * P1(2, 0) - P1(0, 0), u1.x * P1(2, 1) - P1(0, 1),
+			u1.x * P1(2, 2) - P1(0, 2), u1.y * P1(2, 0) - P1(1, 0),
+			u1.y * P1(2, 1) - P1(1, 1), u1.y * P1(2, 2) - P1(1, 2));
+//build B vector
+	Matx41d B(-(u.x * P(2, 3) - P(0, 3)), -(u.y * P(2, 3) - P(1, 3)),
+			-(u1.x * P1(2, 3) - P1(0, 3)), -(u1.y * P1(2, 3) - P1(1, 3)));
+//solve for X
+	Mat_<double> X;
+	solve(A, B, X, DECOMP_SVD);
+	return X;
+}
 
+Mat_<double> IterativeLinearLSTriangulation(Point3d u, //homogenous image point (u,v,1)
+		Matx34d P,          //camera 1 matrix
+		Point3d u1,         //homogenous image point in 2nd camera
+		Matx34d P1          //camera 2 matrix
+		) {
+	double wi = 1, wi1 = 1;
+	Mat_<double> X(4, 1);
+	for (int i = 0; i < 14; i++) { //Hartley suggests 10 iterations at most
+		Mat_<double> X_ = LinearLSTriangulation(u, u1, P, P1);
+		X(0) = X_(0);
+		X(1) = X_(1);
+		X(2) = X_(2);
+		X_(3) = 1.0;
+
+		//recalculate weights
+		double p2x = Mat_<double>(Mat_<double>(P).row(2) * X)(0);
+		double p2x1 = Mat_<double>(Mat_<double>(P1).row(2) * X)(0);
+
+		//breaking point
+		if (fabsf(wi - p2x) <= EPSILON && fabsf(wi1 - p2x1) <= EPSILON)
+			break;
+
+		wi = p2x;
+		wi1 = p2x1;
+
+		//reweight equations and solve
+		Matx43d A((u.x * P(2, 0) - P(0, 0)) / wi,
+				(u.x * P(2, 1) - P(0, 1)) / wi, (u.x * P(2, 2) - P(0, 2)) / wi,
+				(u.y * P(2, 0) - P(1, 0)) / wi, (u.y * P(2, 1) - P(1, 1)) / wi,
+				(u.y * P(2, 2) - P(1, 2)) / wi,
+				(u1.x * P1(2, 0) - P1(0, 0)) / wi1,
+				(u1.x * P1(2, 1) - P1(0, 1)) / wi1,
+				(u1.x * P1(2, 2) - P1(0, 2)) / wi1,
+				(u1.y * P1(2, 0) - P1(1, 0)) / wi1,
+				(u1.y * P1(2, 1) - P1(1, 1)) / wi1,
+				(u1.y * P1(2, 2) - P1(1, 2)) / wi1);
+		Mat_<double> B =
+				(Mat_<double>(4, 1) << -(u.x * P(2, 3) - P(0, 3)) / wi, -(u.y
+						* P(2, 3) - P(1, 3)) / wi, -(u1.x * P1(2, 3) - P1(0, 3))
+						/ wi1, -(u1.y * P1(2, 3) - P1(1, 3)) / wi1);
+
+		solve(A, B, X_, DECOMP_SVD);
+		X(0) = X_(0);
+		X(1) = X_(1);
+		X(2) = X_(2);
+		X_(3) = 1.0;
+	}
+	return X;
+}
+double TriangulatePoints(const vector<KeyPoint>& pt_set1,
+		const vector<KeyPoint>& pt_set2, const Mat&Kinv, const Matx34d& P,
+		const Matx34d& P1, vector<Point3d>& pointcloud) {
+	vector<double> reproj_error;
+	pointcloud.clear();
+	for (unsigned int i = 0; i < pt_set1.size(); i++) {
+//convert to normalized homogeneous coordinates
+		Point2f kp = pt_set1[i].pt;
+		Point3d u(kp.x, kp.y, 1.0);
+		Mat_<double> um = Kinv * Mat_<double>(u);
+		u = um.at<Point3d>(0);
+		Point2f kp1 = pt_set2[i].pt;
+		Point3d u1(kp1.x, kp1.y, 1.0);
+		Mat_<double> um1 = Kinv * Mat_<double>(u1);
+		u1 = um1.at<Point3d>(0);
+//triangulate
+		Mat_<double> X = IterativeLinearLSTriangulation(u, P, u1, P1); //LinearLSTriangulation(u, u1,P,P1);
+//calculate reprojection error
+		Mat_<double> xPt_img = K * Mat(P1) * X;
+		Point2f xPt_img_(xPt_img(0) / xPt_img(2), xPt_img(1) / xPt_img(2));
+		reproj_error.push_back(norm(xPt_img_ - kp1));
+//store 3D point
+		pointcloud.push_back(Point3d(X(0), X(1), X(2)));
+	}
+//return mean reprojection error
+	Scalar me = mean(reproj_error);
+	return me[0];
+}
+void createPoseFromRotationTranslation(Mat_<double> R, Mat_<double> t,
+		Matx34d& Pose) {
+	Pose = Matx34d(R(0, 0), R(0, 1), R(0, 2), t(0), R(1, 0), R(1, 1), R(1, 2),
+			t(1), R(2, 0), R(2, 1), R(2, 2), t(2));
+}
+bool checkCorrectnessOfPose(Matx34d & Pose, vector<KeyPoint> key1,
+		vector<KeyPoint> key2, Mat_<double> Kinv) {
+	vector<Point3d> pcloud_pt3d;
+	TriangulatePoints(key1, key2, Kinv, P, Pose, pcloud_pt3d);
+	pointCloud = pcloud_pt3d;
+	vector<Point3d> pcloud_pt3d_projected(pcloud_pt3d.size());
+
+	Matx44d P4x4 = Matx44d::eye();
+	for (int i = 0; i < 12; i++)
+		P4x4.val[i] = Pose.val[i];
+
+	perspectiveTransform(pcloud_pt3d, pcloud_pt3d_projected, P4x4);
+	int count = 0;
+	for (int i = 0; i < pcloud_pt3d.size(); i++) {
+		count += (pcloud_pt3d_projected[i].z > 0) ? 1 : 0;
+	}
+	double percentage = ((double) count / (double) pcloud_pt3d.size());
+	if (percentage < 0.75)
+		return false; //less than 75% of the points are in front of the camera
+
+	//check for coplanarity of points
+	if (true) //not
+	{
+		cv::Mat_<double> cldm(pcloud_pt3d.size(), 3);
+		for (unsigned int i = 0; i < pcloud_pt3d.size(); i++) {
+			cldm.row(i)(0) = pcloud_pt3d[i].x;
+			cldm.row(i)(1) = pcloud_pt3d[i].y;
+			cldm.row(i)(2) = pcloud_pt3d[i].z;
+		}
+		cv::Mat_<double> mean;
+		cv::PCA pca(cldm, mean, CV_PCA_DATA_AS_ROW);
+
+		int num_inliers = 0;
+		cv::Vec3d nrm = pca.eigenvectors.row(2);
+		nrm = nrm / norm(nrm);
+		cv::Vec3d x0 = pca.mean;
+		double p_to_plane_thresh = sqrt(pca.eigenvalues.at<double>(2));
+
+		for (int i = 0; i < pcloud_pt3d.size(); i++) {
+			Vec3d w = Vec3d(pcloud_pt3d[i]) - x0;
+			double D = fabs(nrm.dot(w));
+			if (D < p_to_plane_thresh)
+				num_inliers++;
+		}
+		if ((double) num_inliers / (double) (pcloud_pt3d.size()) > 0.85)
+			return false;
+	}
+	return true;
+}
+void findCorrectPose(Mat svd_u, Mat svd_vt, Matx33d W, Matx34d& Pose,
+		vector<KeyPoint> key1, vector<KeyPoint> key2, Mat_<double> Kinv) {
+	Mat_<double> R = svd_u * Mat(W) * svd_vt; //HZ 9.19
+	Mat_<double> R1 = svd_u * Mat(W).t() * svd_vt; //HZ 9.19
+	Mat_<double> t = svd_u.col(2); // u3
+	Mat_<double> tneg = -1 * svd_u.col(2); // -u3
+	//step added to refine R
+	SVD rSVD(R);
+	R = rSVD.u * Mat::eye(3, 3, CV_64F) * rSVD.vt;
+	double myscale = trace(rSVD.w)[0] / 3;
+	t = t / myscale;
+	SVD r1SVD(R1);
+	R1 = r1SVD.u * Mat::eye(3, 3, CV_64F) * r1SVD.vt;
+	double myscale1 = trace(r1SVD.w)[0] / 3;
+	tneg = tneg / myscale1;
+	if (!CheckCoherentRotation(R) || !CheckCoherentRotation(R1)) {
+		Pose = 0;
+		return;
+	}
+	//check to see what combination of R/R1 t/tneg gives the correct triangulation
+
+	Matx34d TempPose;
+	createPoseFromRotationTranslation(R, t, Pose);
+	if (checkCorrectnessOfPose(Pose, key1, key2, K.inv())) {
+		Pose = TempPose;
+		return;
+	}
+	createPoseFromRotationTranslation(R, tneg, Pose);
+	if (checkCorrectnessOfPose(Pose, key1, key2, K.inv())) {
+		Pose = TempPose;
+		return;
+	}
+	createPoseFromRotationTranslation(R1, t, Pose);
+	if (checkCorrectnessOfPose(Pose, key1, key2, K.inv())) {
+		Pose = TempPose;
+		return;
+	}
+	createPoseFromRotationTranslation(R1, tneg, Pose);
+	if (checkCorrectnessOfPose(Pose, key1, key2, K.inv())) {
+		Pose = TempPose;
+		return;
+	}
+}
 int findEssentialMatrix(vector<Point2f> imgpts1, vector<Point2f> imgpts2) {
+	vector<KeyPoint> k1, k2;
 	K =
-			(Mat_<double>(3, 3) << 809.506218680149, 0, 367.4993250140925, 0, 809.506218680149, 235.6935329083342, 0, 0, 1);
+			(Mat_<double>(3, 3) << 800.0, 0.0, 360.0, 0.0, 800.0, 240.0, 0.0, 0.0, 1.0);
 	P = Matx34d(1.0, 0, 0, 0, 0, 1.0, 0, 0, 0, 0, 1.0, 0);
 
 	vector<uchar> status(imgpts1.size());
-	Mat F = findFundamentalMat(imgpts1, imgpts2, FM_RANSAC, 0.1, 0.99, status);
+	Mat F = findFundamentalMat(imgpts1, imgpts2, CV_FM_LMEDS, 0.1, 0.99, status);
 	E = K.t() * F * K; //according to HZ (9.12)
 	//decompose E to P' , HZ (9.19)
 	SVD svd(E, SVD::MODIFY_A);
@@ -52,28 +247,21 @@ int findEssentialMatrix(vector<Point2f> imgpts1, vector<Point2f> imgpts2) {
 	Mat svd_w = svd.w;
 	Matx33d W(0, -1, 0,	//HZ 9.13
 			1, 0, 0, 0, 0, 1);
-	Mat_<double> R = svd_u * Mat(W) * svd_vt; //HZ 9.19
-	Mat_<double> t = svd_u.col(2); //u3
-	//step added to refine R
-	SVD rSVD(R);
-	R = rSVD.u * Mat::eye(3, 3, CV_64F) * rSVD.vt;
-	double myscale = trace(rSVD.w)[0] / 3;
-	t = t / myscale;
-	if (!CheckCoherentRotation(R)) {
-		P1 = 0;
-		return 0;
-	}
-	P1 = Matx34d(R(0, 0), R(0, 1), R(0, 2), t(0), R(1, 0), R(1, 1), R(1, 2),
-			t(1), R(2, 0), R(2, 1), R(2, 2), t(2));
+	/////////////////////////////////////////////////////
 	for (unsigned int i = 0; i < status.size(); i++) { // queryIdx is the "left" image
 		if (status[i]) {
 			k1.push_back(KeyPoint(imgpts1[i], CV_32F));
 			k2.push_back(KeyPoint(imgpts2[i], CV_32F));
 		}
 	}
-	if (k1.size() > 0)
+	findCorrectPose(svd_u, svd_vt, W, P1, k1, k2, K.inv());
+	if (k1.size() > 0) {
+		vector<vector<KeyPoint> > temp;
+		temp.push_back(k1);
+		temp.push_back(k2);
+		matchesUsedFor3d.push_back(temp);
 		return 1;
-	else
+	} else
 		return 0;
 }
 
@@ -166,7 +354,11 @@ void OFmatch(Mat img1, Mat img2) {
 // trainIdx is the "right" image
 		imgpts2.push_back(right_keypoints[matches[i].trainIdx].pt);
 	}
-	findEssentialMatrix(imgpts1, imgpts2);
+	//findEssentialMatrix(imgpts1, imgpts2);
+	vector<vector<Point2f> > temp;
+	temp.push_back(imgpts1);
+	temp.push_back(imgpts2);
+	matchesBetweenImages.push_back(temp);
 }
 
 void denseOFmatch(Mat img1, Mat img2, Mat& flow, int step) {
@@ -192,7 +384,11 @@ void denseOFmatch(Mat img1, Mat img2, Mat& flow, int step) {
 						Point2f(cvRound(x + fxy.x), cvRound(y + fxy.y)));
 			}
 		}
-	findEssentialMatrix(imgPnt1, imgPnt2);
+	//findEssentialMatrix(imgPnt1, imgPnt2);
+	vector<vector<Point2f> > temp;
+	temp.push_back(imgPnt1);
+	temp.push_back(imgPnt2);
+	matchesBetweenImages.push_back(temp);
 }
 
 int getMatchesUsingORB(Mat img1, Mat img2) {
@@ -228,108 +424,16 @@ int getMatchesUsingORB(Mat img1, Mat img2) {
 		imgPnt1.push_back(kpnt1[temp[i].queryIdx].pt);
 		imgPnt2.push_back(kpnt2[temp[i].trainIdx].pt);
 	}
-	return findEssentialMatrix(imgPnt1, imgPnt2);
+	//return findEssentialMatrix(imgPnt1, imgPnt2);
+	vector<vector<Point2f> > tempory;
+	tempory.push_back(imgPnt1);
+	tempory.push_back(imgPnt2);
+	matchesBetweenImages.push_back(tempory);
+	return 0;
 }
 
-Mat_<double> LinearLSTriangulation(Point3d u,	//homogenous image point (u,v,1)
-		Point3d u1, 	//homogenous image point in 2nd camera)
-		Matx34d P, Matx34d P1) { 	//camera matrices
-	//build A matrix
-	Matx43d A(u.x * P(2, 0) - P(0, 0), u.x * P(2, 1) - P(0, 1),
-			u.x * P(2, 2) - P(0, 2), u.y * P(2, 0) - P(1, 0),
-			u.y * P(2, 1) - P(1, 1), u.y * P(2, 2) - P(1, 2),
-			u1.x * P1(2, 0) - P1(0, 0), u1.x * P1(2, 1) - P1(0, 1),
-			u1.x * P1(2, 2) - P1(0, 2), u1.y * P1(2, 0) - P1(1, 0),
-			u1.y * P1(2, 1) - P1(1, 1), u1.y * P1(2, 2) - P1(1, 2));
-//build B vector
-	Matx41d B(-(u.x * P(2, 3) - P(0, 3)), -(u.y * P(2, 3) - P(1, 3)),
-			-(u1.x * P1(2, 3) - P1(0, 3)), -(u1.y * P1(2, 3) - P1(1, 3)));
-//solve for X
-	Mat_<double> X;
-	solve(A, B, X, DECOMP_SVD);
-	return X;
-}
-
-Mat_<double> IterativeLinearLSTriangulation(Point3d u, //homogenous image point (u,v,1)
-		Matx34d P,          //camera 1 matrix
-		Point3d u1,         //homogenous image point in 2nd camera
-		Matx34d P1          //camera 2 matrix
-		) {
-	double wi = 1, wi1 = 1;
-	Mat_<double> X(4, 1);
-	for (int i = 0; i < 14; i++) { //Hartley suggests 10 iterations at most
-		Mat_<double> X_ = LinearLSTriangulation(u, u1, P, P1);
-		X(0) = X_(0);
-		X(1) = X_(1);
-		X(2) = X_(2);
-		X_(3) = 1.0;
-
-		//recalculate weights
-		double p2x = Mat_<double>(Mat_<double>(P).row(2) * X)(0);
-		double p2x1 = Mat_<double>(Mat_<double>(P1).row(2) * X)(0);
-
-		//breaking point
-		if (fabsf(wi - p2x) <= EPSILON && fabsf(wi1 - p2x1) <= EPSILON)
-			break;
-
-		wi = p2x;
-		wi1 = p2x1;
-
-		//reweight equations and solve
-		Matx43d A((u.x * P(2, 0) - P(0, 0)) / wi,
-				(u.x * P(2, 1) - P(0, 1)) / wi, (u.x * P(2, 2) - P(0, 2)) / wi,
-				(u.y * P(2, 0) - P(1, 0)) / wi, (u.y * P(2, 1) - P(1, 1)) / wi,
-				(u.y * P(2, 2) - P(1, 2)) / wi,
-				(u1.x * P1(2, 0) - P1(0, 0)) / wi1,
-				(u1.x * P1(2, 1) - P1(0, 1)) / wi1,
-				(u1.x * P1(2, 2) - P1(0, 2)) / wi1,
-				(u1.y * P1(2, 0) - P1(1, 0)) / wi1,
-				(u1.y * P1(2, 1) - P1(1, 1)) / wi1,
-				(u1.y * P1(2, 2) - P1(1, 2)) / wi1);
-		Mat_<double> B =
-				(Mat_<double>(4, 1) << -(u.x * P(2, 3) - P(0, 3)) / wi, -(u.y
-						* P(2, 3) - P(1, 3)) / wi, -(u1.x * P1(2, 3) - P1(0, 3))
-						/ wi1, -(u1.y * P1(2, 3) - P1(1, 3)) / wi1);
-
-		solve(A, B, X_, DECOMP_SVD);
-		X(0) = X_(0);
-		X(1) = X_(1);
-		X(2) = X_(2);
-		X_(3) = 1.0;
-	}
-	return X;
-}
-
-double TriangulatePoints(const vector<KeyPoint>& pt_set1,
-		const vector<KeyPoint>& pt_set2, const Mat&Kinv, const Matx34d& P,
-		const Matx34d& P1, vector<Point3d>& pointcloud) {
-	vector<double> reproj_error;
-	pointcloud.clear();
-	for (unsigned int i = 0; i < pt_set1.size(); i++) {
-//convert to normalized homogeneous coordinates
-		Point2f kp = pt_set1[i].pt;
-		Point3d u(kp.x, kp.y, 1.0);
-		Mat_<double> um = Kinv * Mat_<double>(u);
-		u = um.at<Point3d>(0);
-		Point2f kp1 = pt_set2[i].pt;
-		Point3d u1(kp1.x, kp1.y, 1.0);
-		Mat_<double> um1 = Kinv * Mat_<double>(u1);
-		u1 = um1.at<Point3d>(0);
-//triangulate
-		Mat_<double> X = IterativeLinearLSTriangulation(u, P, u1, P1); //LinearLSTriangulation(u, u1,P,P1);
-//calculate reprojection error
-		Mat_<double> xPt_img = K * Mat(P1) * X;
-		Point2f xPt_img_(xPt_img(0) / xPt_img(2), xPt_img(1) / xPt_img(2));
-		reproj_error.push_back(norm(xPt_img_ - kp1));
-//store 3D point
-		pointcloud.push_back(Point3d(-X(0), X(1), X(2)));
-	}
-//return mean reprojection error
-	Scalar me = mean(reproj_error);
-	return me[0];
-}
-
-void mDrawMatches(Mat& out) {
+void mDrawMatches(Mat image1, Mat image2, Mat& out, vector<KeyPoint> k1,
+		vector<KeyPoint> k2) {
 	Mat i1, i2;
 	cvtColor(image1, i1, CV_RGBA2RGB);
 	cvtColor(image2, i2, CV_RGBA2RGB);
@@ -354,19 +458,25 @@ JNIEXPORT jint JNICALL
 Java_com_example_sfm_MainActivity_match(JNIEnv *env, jobject obj,
 		jlong addrOut) {
 	Mat& mRgb = *(Mat*) addrOut;
+	Mat image1 = imageList[0];
+	Mat image2 = imageList[imageList.size() - 1];
 	ratio = false;
 	Mat out;
 	int success = 1;
 	if (matcherAlgo == 0) {
-		success = getMatchesUsingORB(image1, image2);
+		//getMatchesUsingORB(image1, image2);
 	} else if (matcherAlgo == 1) {
 		OFmatch(image1, image2);
 	} else if (matcherAlgo == 2) {
 		Mat flow;
-		denseOFmatch(image1, image2, flow, 10);
+		//denseOFmatch(image1, image2, flow, 10);
 	}
 //resize(out,out,image1.size());
-	mDrawMatches(mRgb);
+	vector<KeyPoint> k1, k2;
+	PointsToKeyPoints(matchesBetweenImages[0][0], k1);
+	PointsToKeyPoints(matchesBetweenImages[0][1], k2);
+	mDrawMatches(image1, image2, out, k1, k2);
+	out.copyTo(mRgb);
 	return success;
 }
 JNIEXPORT double JNICALL
@@ -377,35 +487,26 @@ Java_com_example_sfm_MainActivity_updateCurrentImage(JNIEnv *env, jobject obj,
 	return reError;
 }
 JNIEXPORT void JNICALL
-Java_com_example_sfm_MainActivity_setImage1(JNIEnv *env, jobject obj,
-		jlong addrOut) {
-	pointCloud.clear();
-	k1.clear();
-	k2.clear();
-	Mat& mRgb = *(Mat*) addrOut;
-	image.copyTo(image1);
-	image1.copyTo(mRgb);
-}
-JNIEXPORT void JNICALL
-Java_com_example_sfm_MainActivity_setImage2(JNIEnv *env, jobject obj,
+Java_com_example_sfm_MainActivity_setImage(JNIEnv *env, jobject obj,
 		jlong addrOut) {
 	Mat& mRgb = *(Mat*) addrOut;
-	image.copyTo(image2);
-	image2.copyTo(mRgb);
+	imageList.push_back(image.clone());
+	image.copyTo(mRgb);
 }
 JNIEXPORT void JNICALL
 Java_com_example_sfm_MainActivity_setMatcher(JNIEnv *env, jobject obj,
 		jint in) {
-	k1.clear();
-	k2.clear();
+	matchesUsedFor3d.clear();
+	matchesBetweenImages.clear();
 	matcherAlgo = in;
 }
 JNIEXPORT jdoubleArray JNICALL Java_com_example_sfm_Points_getPointsArray(
 		JNIEnv *env, jobject obj) {
-	if (!k1.empty()) {
-		Mat kinv = K.inv();
+	if (!matchesBetweenImages.empty()) {
 		pointCloud.clear();
-		reError = TriangulatePoints(k1, k2, kinv, P, P1, pointCloud);
+		Mat kinv = K.inv();
+		vector<KeyPoint> k1, k2;
+		findEssentialMatrix(matchesBetweenImages[0][0],matchesBetweenImages[0][1]);
 	}
 	int i, size;
 	if (pointCloud.empty()) {
@@ -444,32 +545,34 @@ JNIEXPORT jdoubleArray JNICALL Java_com_example_sfm_Points_getPointsArray(
 JNIEXPORT jfloatArray JNICALL Java_com_example_sfm_Points_getColorsArray(
 		JNIEnv *env, jobject obj) {
 	int size = 0;
+	vector<KeyPoint> k1;
+	if(!matchesUsedFor3d.empty()){k1 =matchesUsedFor3d[0][0];}
 	if (k1.empty()) {
-		jfloat fill[9 * 4];
-		size = 9 * 4;
-		for (int i = 0; i < 9; i++) {
-			fill[i * 4] = ((rand() % 100 + 10) / 110.f);
-			fill[i * 4 + 1] = ((rand() % 100 + 10) / 110.f);
-			fill[i * 4 + 2] = ((rand() % 100 + 10) / 110.f);
-			fill[i * 4 + 3] = 1.0f;
-		}
-		jfloatArray result;
-		result = env->NewFloatArray(size);
-		if (result == NULL) {
-			return NULL; /* out of memory error thrown */
-		}
-		// move from the temp structure to the java structure
-		env->SetFloatArrayRegion(result, 0, size, fill);
-		return result;
+	jfloat fill[9 * 4];
+	size = 9 * 4;
+	for (int i = 0; i < 9; i++) {
+		fill[i * 4] = ((rand() % 100 + 10) / 110.f);
+		fill[i * 4 + 1] = ((rand() % 100 + 10) / 110.f);
+		fill[i * 4 + 2] = ((rand() % 100 + 10) / 110.f);
+		fill[i * 4 + 3] = 1.0f;
+	}
+	jfloatArray result;
+	result = env->NewFloatArray(size);
+	if (result == NULL) {
+		return NULL; /* out of memory error thrown */
+	}
+	// move from the temp structure to the java structure
+	env->SetFloatArrayRegion(result, 0, size, fill);
+	return result;
 	} else {
 		size = k1.size() * 4;
 		jfloat fill[size];
 		Mat matC;
-		cvtColor(image1,matC,CV_RGBA2RGB);
+		cvtColor(imageList[0], matC, CV_RGBA2RGB);
 		for (int i = 0; i < k1.size(); i++) {
-			fill[i * 4] = (matC.at<Vec3b>(k1[i].pt)).val[0]/255.f;
-			fill[i * 4 + 1] = (matC.at<Vec3b>(k1[i].pt)).val[1]/255.f;
-			fill[i * 4 + 2] = (matC.at<Vec3b>(k1[i].pt)).val[2]/255.f;
+			fill[i * 4] = (matC.at<Vec3b>(k1[i].pt)).val[0] / 255.f;
+			fill[i * 4 + 1] = (matC.at<Vec3b>(k1[i].pt)).val[1] / 255.f;
+			fill[i * 4 + 2] = (matC.at<Vec3b>(k1[i].pt)).val[2] / 255.f;
 			fill[i * 4 + 3] = 1.0f;
 		}
 		jfloatArray result;
@@ -486,12 +589,11 @@ JNIEXPORT jfloatArray JNICALL Java_com_example_sfm_Points_getColorsArray(
 
 JNIEXPORT void JNICALL
 Java_com_example_sfm_MainActivity_ClearAll(JNIEnv *env, jobject obj) {
-	image1 = Mat();
-	image2 = Mat();
+	imageList.clear();
+	matchesBetweenImages.clear();
+	matchesUsedFor3d.clear();
 	E = Mat();
 	K = Mat(3, 3, CV_64F);
-	k1.clear();
-	k2.clear();
 	P = Matx34d();
 	P1 = Matx34d();
 	pointCloud.clear();

@@ -2,7 +2,6 @@ package com.example.sfm;
 
 import java.nio.ByteBuffer;
 import java.nio.ByteOrder;
-import java.nio.DoubleBuffer;
 import java.nio.FloatBuffer;
 
 import javax.microedition.khronos.opengles.GL10;
